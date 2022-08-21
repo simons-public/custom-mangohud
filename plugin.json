@@ -1,0 +1,10 @@
+{
+  "name": "MangoHUD",
+  "author": "Chris Simons",
+  "flags": ["debug"],
+  "publish": {
+    "tags": ["mangohud", "mango", "hud"],
+    "description": "Decky plugin to use a custom MangoHUD configuration",
+    "image": ""
+  }
+}
