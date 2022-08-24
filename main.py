@@ -2,6 +2,8 @@ import os
 import subprocess
 from logging import DEBUG, INFO, getLogger
 
+import getpass
+
 logger = getLogger("custom-mangohud")
 
 SYSTEMD_PATH="/home/deck/.config/systemd/user"
@@ -58,85 +60,128 @@ background_alpha=0
 class Plugin:
     """ backend plugin class """
 
-    def _create_service_files():
+    @staticmethod
+    def _create_service_files() -> None:
         """" helper to create the service files """
         os.makedirs(SYSTEMD_PATH, exist_ok=True)
         with open(PATH_FILE, 'w') as f:
             f.writelines(PATH_SOURCE)
         with open(SERVICE_FILE, 'w') as f:
             f.writelines(SERVICE_SOURCE)
-    
-    def _create_starter_config():
+
+    @staticmethod
+    def _create_starter_config() -> None:
         """ create a default custom configuration """
         with open(MANGO_CONFIG_FILE, "w") as f:
             f.writelines(STARTER_CONFIG)
 
-    def _get_steam_mango_config_file(self):
-        """ this gets the last modified file (sometimes there are multiple)
-        in the future this should grab the envirionment variable from the mangoapp process """
-        files = [f for f in os.scandir("/tmp") if 'mangohud.' in f.name]
-        latest = max(files, key=os.path.getmtime)
-        return f"/tmp/{latest.name}"
+    @staticmethod
+    def _get_mangoapp_pid() -> int:
+        """ return the pid of mangoapp """
+        # get all pids in /proc
+        pids = [int(f.name) for f in os.scandir("/proc") if
+            f.is_dir() and f.name.isnumeric()]
 
-    def _get_current_config_id(self):
-        """ gets the mktmp extension for use with the systemd units """
-        return self._get_steam_mango_config_file(self).split(".")[-1]
-
-    def touch_config(self):
-        """ mangohud doesn't update unless the file modification date changes """
-        logger.info(f"touching file: {self._get_steam_mango_config_file(self)}")
-        os.utime(self._get_steam_mango_config_file(self))
-
-    async def get_custom_hud_state(self):
-        self.touch_config(self)
+        # read the cmdline of all pids
         try:
+            for pid in pids:
+                with open(f"/proc/{pid}/cmdline", 'r') as f:
+                    if 'mangoapp' in f.read():
+                        return pid
+
+        # ignore pids that have died before being read
+        except FileNotFoundError:
+            pass
+
+    @staticmethod
+    def _get_steam_mango_config_file() -> str:
+        """ returns the MANGOHUD_CONFIG variable from the mangoapp pid """
+        with open(f"/proc/{Plugin._get_mangoapp_pid()}/environ", 'r') as f:
+            env = [e for e in f.read().split("\x00") if 'MANGOHUD_CONFIGFILE' in e]
+            return env.pop().split("=")[-1]
+
+    @staticmethod
+    def _get_current_config_id() -> str:
+        """ returns the mktmp extension for use with the systemd units """
+        return Plugin._get_steam_mango_config_file().split(".")[-1]
+
+    @staticmethod
+    def _touch_config():
+        """ mangohud doesn't seem to update unless the file modification date changes """
+        logger.debug(f"touching file: {Plugin._get_steam_mango_config_file()}")
+        os.utime(Plugin._get_steam_mango_config_file())
+
+    @staticmethod
+    def _backup_config():
+        """ backup the current config file """
+        logger.debug(f"copying {Plugin._get_steam_mango_config_file()} to {MANGO_CONFIG_BACKUP}")
+        with open(Plugin._get_steam_mango_config_file(), 'r') as src:
+            buffer = src.read()
+
+        with open(MANGO_CONFIG_BACKUP, 'w') as dst:
+            dst.write(buffer)
+            dst.flush()
+
+    @staticmethod
+    def _restore_config():
+        """ restore the previous config file """
+        logger.debug(f"copying {MANGO_CONFIG_BACKUP} to {Plugin._get_steam_mango_config_file()}")
+        with open(MANGO_CONFIG_BACKUP, 'r') as src:
+            buffer = src.read()
+
+        with open(Plugin._get_steam_mango_config_file(), 'w') as dst:
+            dst.write(buffer)
+            dst.flush()
+
+        with open(Plugin._get_steam_mango_config_file(), 'r') as dst:
+            print(dst.read())
+
+    async def get_custom_hud_state(self) -> bool:
+        """ returns true if custom hud is active """
+        logger.debug("getting custom hud state")
+        try:
+            Plugin._touch_config()
             return subprocess.Popen(
-                f"/usr/bin/systemctl is-active --user customhud@{self._get_current_config_id(self)}.path",
+                f"/usr/bin/systemctl is-active --user customhud@{Plugin._get_current_config_id()}.path",
                 stdout=subprocess.PIPE, shell=True, env=ENV).communicate()[0] == b'active\n'
         except:
             logger.exception("traceback:")
 
-    async def set_custom_hud_state(self, state):
+    async def set_custom_hud_state(self, state) -> None:
+        """ enable or disable the custom hud """
         if state:
-            logger.info("turning on custom mangohud")
+            logger.info("Turning on custom MangoHUD")
             try:
-                # backup existing config
-                with open(self._get_steam_mango_config_file(self), 'r') as src:
-                    with open(MANGO_CONFIG_BACKUP, 'w') as dst:
-                        logger.info(f"copying {src.name} to {dst.name}")
-                        dst.writelines(src.readlines())
-
-                ret = subprocess.Popen(
-                    f"/usr/bin/systemctl enable --now --user customhud@{self._get_current_config_id(self)}.path",
+                Plugin._backup_config()
+                subprocess.Popen(
+                    f"/usr/bin/systemctl enable --now --user customhud@{Plugin._get_current_config_id()}.path",
                     stdout=subprocess.PIPE, shell=True, env=ENV).wait()
-                self.touch_config(self)
-                return ret
+                Plugin._touch_config()
+                return
             except:
                 logger.exception("traceback:")
         else:
-            logger.info("turning off custom mangohud")
+            logger.info("Turning off custom MangoHUD")
             try:
-                # restore existing config
-                with open(self._get_steam_mango_config_file(self), 'w') as dst:
-                    with open(MANGO_CONFIG_BACKUP, 'r') as src:
-                        logger.info(f"copying {src.name} to {dst.name}")
-                        buffer = src.readlines()
-                        dst.writelines(buffer)
-
-                ret = subprocess.Popen(
-                    f"/usr/bin/systemctl disable --now --user customhud@{self._get_current_config_id(self)}.path",
+                Plugin._restore_config()
+                subprocess.Popen(
+                    f"/usr/bin/systemctl disable --now --user customhud@{Plugin._get_current_config_id()}.path",
                     stdout=subprocess.PIPE, shell=True, env=ENV).wait()
-                self.touch_config(self)    
-                return ret
+                Plugin._touch_config()
+                return
             except:
                 logger.exception("traceback:")
 
-
-
     async def _main(self):
         """ plugin startup routine """
+        logger.info("Starting Custom MangoHUD Plugin")
+        
+        # drop privileges (required until #152 gets merged)
+        os.setgid(1000)
+        os.setuid(1000)
+
         if (not os.path.exists(PATH_FILE)) or (not os.path.exists(SERVICE_FILE)):
-            self._create_service_files()
+            Plugin._create_service_files()
 
         if not os.path.exists(MANGO_CONFIG_FILE):
-            self._create_starter_config()
+            Plugin._create_starter_config()
